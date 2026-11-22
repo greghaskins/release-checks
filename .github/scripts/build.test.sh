@@ -73,9 +73,12 @@ case "$STUB" in
   attest) echo '{"digest":"sha256:'"$(printf 'e%.0s' {1..64})"'","manifests":[{"platform":{"os":"linux","architecture":"amd64"}},{"platform":{"os":"linux","architecture":"arm64"}},{"platform":{"os":"unknown","architecture":"unknown"}}]}' ;;
   single) echo '{"mediaType":"application/vnd.oci.image.manifest.v1+json","digest":"sha256:'"$(printf 'e%.0s' {1..64})"'"}' ;;
   variant) echo '{"digest":"sha256:'"$(printf 'e%.0s' {1..64})"'","manifests":[{"platform":{"os":"linux","architecture":"amd64"}},{"platform":{"os":"linux","architecture":"arm64","variant":"v8"}}]}' ;;
+  # ghcr's real answers through buildx (measured): a missing tag, package or
+  # owner all read "<ref>: not found"; another repo's private package, 403.
+  missing-tag) echo 'ERROR: ghcr.io/x/y:r-1: not found' >&2; exit 1 ;;
+  denied) echo 'ERROR: unexpected status from HEAD request to https://ghcr.io/v2/x/y/manifests/r-1: 403 Forbidden' >&2; exit 1 ;;
+  server) echo 'ERROR: unexpected status from HEAD request to https://ghcr.io/v2/x/y/manifests/r-1: 500 Internal Server Error' >&2; exit 1 ;;
   manifest-unknown) echo 'ERROR: ghcr.io/x/y:r-1: not found: MANIFEST_UNKNOWN: manifest unknown' >&2; exit 1 ;;
-  name-unknown) echo 'ERROR: failed to resolve: NAME_UNKNOWN: repository name not known to registry' >&2; exit 1 ;;
-  denied) echo 'ERROR: failed to authorize: 403 Forbidden' >&2; exit 1 ;;
   net) echo 'ERROR: dial tcp: lookup ghcr.io: no such host' >&2; exit 1 ;;
 esac
 STUB
@@ -89,9 +92,10 @@ rs "an index of exactly amd64 and arm64 is found" index 0 "found sha256:"
 rs "an index with an attestation entry fails" attest 1 ""
 rs "a single-platform manifest fails" single 1 ""
 rs "an arm64 variant does not count as linux/arm64" variant 1 ""
-rs "MANIFEST_UNKNOWN is missing" manifest-unknown 0 missing
-rs "NAME_UNKNOWN is missing" name-unknown 0 missing
+rs "ghcr's 'not found' is missing" missing-tag 0 missing
+rs "MANIFEST_UNKNOWN wording is missing too" manifest-unknown 0 missing
 rs "403 is an error, not missing" denied 1 ""
+rs "500 is an error" server 1 ""
 rs "a network error is an error" net 1 ""
 
 echo "1..$n"

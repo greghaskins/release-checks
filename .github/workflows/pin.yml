@@ -1,18 +1,8 @@
 # The `pin` check: the caller's commit names its own image by content tag and
 # digest, and that image exists. Call it from a job in the caller's
-# .github/workflows, pinned by full commit SHA:
-#
-#   pin:
-#     needs: image          # runs after the image job, whatever its result
-#     if: always()
-#     uses: greghaskins/release-checks/.github/workflows/pin.yml@<40-hex sha>
-#     permissions:
-#       contents: read
-#       packages: read
-#     with:
-#       inputs-file: .github/image-inputs
-#       image: ghcr.io/owner/app
-#       pin-file: deploy/base/kustomization.yaml
+# .github/workflows, pinned by full commit SHA, after the image job and whatever
+# its result (`needs: image`, `if: always()`), with `contents: read` and
+# `packages: read`. The README has a complete caller job.
 #
 # The scripts run from this repo at the SHA the caller pinned, never from the
 # caller's tree: the caller's checkout is data here. Rules: .github/scripts/
@@ -47,7 +37,7 @@ on:
         type: string
         default: run the pin script on the branch
       release-checks-sha:
-        description: Fallback only, when the job context lacks workflow_sha. The same SHA as in the caller's `uses:`.
+        description: Fallback only, when the job context lacks workflow_sha. The same SHA the caller calls this workflow at.
         type: string
         default: ""
 
@@ -73,7 +63,7 @@ jobs:
           repo="${REPO:-greghaskins/release-checks}"
           sha="${SHA:-$FALLBACK}"
           if ! [[ "$sha" =~ ^[0-9a-f]{40}$ ]]; then
-            echo "::error::cannot tell which release-checks commit this is: job.workflow_sha is '${SHA}', and the release-checks-sha input is '${FALLBACK}'. Set release-checks-sha to the SHA in your uses: line."
+            echo "::error::cannot tell which release-checks commit this is: job.workflow_sha is '${SHA}', and the release-checks-sha input is '${FALLBACK}'. Set release-checks-sha to the SHA you call this workflow at."
             exit 1
           fi
           echo "release-checks: ${repo}@${sha} (from ${SHA:+job.workflow_sha}${SHA:-the release-checks-sha input})"

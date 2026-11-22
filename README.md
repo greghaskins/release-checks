@@ -56,7 +56,7 @@ and `pin-fix` (your repo's re-pin command, shown in failures).
 
 The workflow reads the commit it runs at from `job.workflow_sha` and checks this
 repo out there for its scripts. If that context is ever empty, set the
-`release-checks-sha` input to the SHA in your `uses:` line.
+`release-checks-sha` input to the SHA you call it at.
 
 The check shows up as `<your job> / pin`; require that name in your rulesets.
 

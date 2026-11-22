@@ -1,0 +1,27 @@
+name: lint
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  lint:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: actionlint
+        run: |
+          go install github.com/rhysd/actionlint/cmd/actionlint@v1.7.12
+          "$(go env GOPATH)/bin/actionlint"
+      - name: shellcheck
+        run: |
+          mapfile -t files < <(git ls-files '*.sh')
+          if [ "${#files[@]}" -gt 0 ]; then shellcheck "${files[@]}"; fi
+      - name: repo rules
+        run: bash .github/scripts/repo-rules.sh

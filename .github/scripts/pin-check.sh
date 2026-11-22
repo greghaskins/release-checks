@@ -1,39 +1,38 @@
 #!/usr/bin/env bash
 # The pin check: the commit names its own image by content tag and digest,
-# and that image exists. Run from the caller's checkout, with the base commit
-# available (fetch depth 2 or more).
+# and that image exists. Run from the caller's checkout of the commit to
+# check (a pull request's head, never GitHub's merge commit).
+#
+# The image name and the pin file come from the commit's .github/image.json,
+# read through content-tag.sh --config, the same as the build and the pin
+# script read it.
 #
 # Settings, from the environment:
-#   INPUTS     content-tag inputs file (required)
-#   IMAGE      image name, e.g. ghcr.io/owner/app (required)
-#   PIN_FILE   the kustomization that pins IMAGE (required)
-#   BASE       revision to compare with for rule 4 (default HEAD^1: the base
-#              branch on a pull request's merge ref, the previous commit on a
-#              push)
-#   RENDER_DIR directory to render for rule 3 (default: PIN_FILE's directory)
-#   DROP_COMPONENTS  true: render a copy with the kustomization's top-level
-#              `components:` removed, for components CI cannot fetch. Only
-#              safe when they set no IMAGE.
+#   BASE_DIR   a checkout of the base commit (a pull request's base, or the
+#              previous commit on a push), for rule 4. Unset or empty: there
+#              is no base, and rule 4 has nothing to compare.
+#   RENDER_DIR directory to render for rule 3 (default: the pin file's)
+#   DROP_COMPONENTS  true: render a copy without the remote entries of the
+#              kustomization's top-level components: (ones CI cannot fetch).
+#              Local components stay.
 #   PIN_FIX    how to re-pin, shown in failures (default: run the pin script)
 #   INSPECT    registry command (default: docker buildx imagetools inspect);
 #              it gets `<ref> --format {{json .Manifest}}`
 #   KUSTOMIZE  kustomize binary (default: kustomize)
 #
-# The pin file holds, in the images entry for IMAGE:
-#     newTag: x-<16 hex>
+# The pin file holds, in the images entry for the image:
+#     newTag: r-<64 hex>
 #     digest: sha256:<64 hex>
 #
 # Rules, each failure printed with its number, what is wrong and the fix:
-#   1. the pinned tag is this tree's content tag;
+#   1. the pinned tag is this commit's content tag;
 #   2. the registry holds that tag, under the pinned digest;
-#   3. the render references IMAGE only by the pinned digest;
+#   3. the render references the image only by the pinned digest;
 #   4. a tag the base already pins keeps its digest.
 set -euo pipefail
 
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-: "${INPUTS:?set INPUTS}" "${IMAGE:?set IMAGE}" "${PIN_FILE:?set PIN_FILE}"
-BASE="${BASE:-HEAD^1}"
-RENDER_DIR="${RENDER_DIR:-$(dirname "$PIN_FILE")}"
+BASE_DIR="${BASE_DIR:-}"
 DROP_COMPONENTS="${DROP_COMPONENTS:-false}"
 PIN_FIX="${PIN_FIX:-run the pin script on the branch}"
 KUSTOMIZE="${KUSTOMIZE:-kustomize}"
@@ -105,6 +104,15 @@ pin_of() {
   echo "$t $d"
 }
 
+# --- the image config --------------------------------------------------------
+if ! config="$("$here/content-tag.sh" --config . HEAD 2>"$errd"/config.err)"; then
+  fail 1 "cannot read the image config: $(cat "$errd"/config.err)" "fix .github/image.json or the file it names"
+  exit 1
+fi
+IMAGE="$(jq -r .image <<<"$config")"
+PIN_FILE="$(jq -r .pin_file <<<"$config")"
+RENDER_DIR="${RENDER_DIR:-$(dirname "$PIN_FILE")}"
+
 # --- the pin at HEAD -------------------------------------------------------
 if ! content="$(git show "HEAD:${PIN_FILE}" 2>/dev/null)"; then
   fail 1 "cannot read ${PIN_FILE} at HEAD" "restore the pin file"
@@ -123,8 +131,8 @@ if [ -z "$digest" ]; then digest="$tag"; tag=""; fi
 
 # --- rule 1 ----------------------------------------------------------------
 want=""
-if ! want="$("$here/content-tag.sh" . "$INPUTS" HEAD 2>"$errd"/content-tag.err)"; then
-  fail 1 "cannot compute the content tag: $(cat "$errd"/content-tag.err)" "fix the paths in ${INPUTS}"
+if ! want="$("$here/content-tag.sh" . HEAD 2>"$errd"/content-tag.err)"; then
+  fail 1 "cannot compute the content tag: $(cat "$errd"/content-tag.err)" "fix .github/image.json or the file it names"
 elif [ -z "$tag" ]; then
   fail 1 "${PIN_FILE} has no newTag for ${IMAGE}; this tree's content tag is ${want}" "$PIN_FIX"
 elif [ "$tag" != "$want" ]; then
@@ -191,12 +199,14 @@ else
 fi
 
 # --- rule 4 ----------------------------------------------------------------
-if ! git rev-parse --verify --quiet "${BASE}^{commit}" >/dev/null; then
-  fail 4 "cannot read the base pin: revision ${BASE} does not resolve" "fetch at least two commits; the base must be readable to rule out a re-pushed tag"
-elif [ -n "$(git ls-tree --name-only "$BASE" -- "$PIN_FILE")" ]; then
-  base_content="$(git show "${BASE}:${PIN_FILE}")"
+if [ -z "$BASE_DIR" ]; then
+  echo "pin: no base commit, so rule 4 has nothing to compare (a first push)"
+elif [ ! -d "$BASE_DIR" ]; then
+  fail 4 "cannot read the base pin: ${BASE_DIR} is not a checkout" "re-run this job; the base must be readable to rule out a re-pushed tag"
+elif [ -f "${BASE_DIR}/${PIN_FILE}" ]; then
+  base_content="$(cat "${BASE_DIR}/${PIN_FILE}")"
   if ! bp="$(pin_of "$base_content" 2>"$errd"/pin-of.err)"; then
-    fail 4 "cannot read the base pin (${PIN_FILE} at ${BASE}): $(cat "$errd"/pin-of.err)" "escalate to the repo owner: the base's pin file is malformed"
+    fail 4 "cannot read the base pin (${PIN_FILE}): $(cat "$errd"/pin-of.err)" "escalate to the repo owner: the base's pin file is malformed"
   elif [ "$bp" != unpinned ]; then
     read -r btag bdigest <<<"$bp" || true
     if [ -n "$bdigest" ] && [ "$btag" = "$tag" ] && [ "$bdigest" != "$digest" ]; then

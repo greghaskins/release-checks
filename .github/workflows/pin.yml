@@ -12,24 +12,12 @@ name: pin
 on:
   workflow_call:
     inputs:
-      inputs-file:
-        description: Content-tag inputs file in the caller's repo, one path per line (keep it under .github/).
-        type: string
-        required: true
-      image:
-        description: Image name, e.g. ghcr.io/owner/app.
-        type: string
-        required: true
-      pin-file:
-        description: The kustomization whose images entry pins the image.
-        type: string
-        required: true
       render-dir:
-        description: Directory to render for rule 3. Default, the pin file's directory.
+        description: Directory to render for rule 3. Default, the pin file's directory (pin_file in .github/image.json).
         type: string
         default: ""
       drop-components:
-        description: Render a copy without the kustomization's top-level components (ones CI cannot fetch). Only if they set no image.
+        description: Render a copy without the remote entries of the kustomization's top-level components (ones CI cannot fetch). Local components stay.
         type: boolean
         default: false
       pin-fix:
@@ -73,13 +61,36 @@ jobs:
             echo "repo=${repo}"
             echo "sha=${sha}"
           } >> "$GITHUB_OUTPUT"
-      # Two sibling checkouts: the caller's tree (data only) and this repo,
-      # so neither lands inside the other.
+      # The commit to check is a pull request's head, never GitHub's merge
+      # commit; on a push, the pushed commit. The base is the pull request's
+      # base, or the commit before the push (none for a new branch).
+      - name: Which commits
+        id: commits
+        env:
+          HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.before }}
+        run: |
+          set -euo pipefail
+          base="$BASE_SHA"
+          if ! [[ "$base" =~ ^[0-9a-f]{40}$ ]] || [ "$base" = 0000000000000000000000000000000000000000 ]; then base=""; fi
+          echo "head ${HEAD_SHA}, base ${base:-none}"
+          {
+            echo "head=${HEAD_SHA}"
+            echo "base=${base}"
+          } >> "$GITHUB_OUTPUT"
+      # Sibling checkouts: the commit to check and its base (data only), and
+      # this repo, so none lands inside another.
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          ref: ${{ steps.commits.outputs.head }}
           path: caller
           persist-credentials: false
-          fetch-depth: 2
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        if: steps.commits.outputs.base != ''
+        with:
+          ref: ${{ steps.commits.outputs.base }}
+          path: base
+          persist-credentials: false
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           repository: ${{ steps.checks.outputs.repo }}
@@ -123,13 +134,12 @@ jobs:
       - name: Check the pin
         working-directory: caller
         env:
-          INPUTS: ${{ inputs.inputs-file }}
-          IMAGE: ${{ inputs.image }}
-          PIN_FILE: ${{ inputs.pin-file }}
+          BASE: ${{ steps.commits.outputs.base }}
           RENDER_DIR: ${{ inputs.render-dir }}
           DROP_COMPONENTS: ${{ inputs.drop-components }}
           PIN_FIX: ${{ inputs.pin-fix }}
         run: |
           set -euo pipefail
           if [ -z "$RENDER_DIR" ]; then unset RENDER_DIR; fi
+          if [ -n "$BASE" ]; then export BASE_DIR="$GITHUB_WORKSPACE/base"; fi
           ../checks/.github/scripts/pin-check.sh

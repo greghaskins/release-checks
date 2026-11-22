@@ -59,7 +59,8 @@ jobs:
         run: |
           set -euo pipefail
           if [ "$EVENT" != push ] || [ "$REF_TYPE" != tag ]; then
-            echo "::error::release runs on a tag push, not ${EVENT} of a ${REF_TYPE}"; exit 1
+            echo "::error::release runs on a tag push, not ${EVENT} of a ${REF_TYPE}"
+            echo "- release: runs on a tag push, not ${EVENT} of a ${REF_TYPE}" >> "$GITHUB_STEP_SUMMARY"; exit 1
           fi
           if [ -z "$RC_REPO" ] || ! [[ "$RC_SHA" =~ ^[0-9a-f]{40}$ ]]; then
             echo "::error::cannot tell which release-checks commit this is (job.workflow_repository '${RC_REPO}', job.workflow_sha '${RC_SHA}')"; exit 1
@@ -88,10 +89,16 @@ jobs:
           git init -q "$APP"
           auth="AUTHORIZATION: basic $(printf 'x-access-token:%s' "$GH_TOKEN" | base64 -w0)"
           echo "::add-mask::$auth"
+          fail() { echo "::error::$1"; echo "- release ${TAG}: $1" >> "$GITHUB_STEP_SUMMARY"; exit 1; }
           GIT_CONFIG_COUNT=2 GIT_CONFIG_KEY_0=http.https://github.com/.extraheader GIT_CONFIG_VALUE_0="$auth" \
             GIT_CONFIG_KEY_1=core.hooksPath GIT_CONFIG_VALUE_1=/dev/null \
-            git -C "$APP" fetch -q --depth=1 --no-tags "https://github.com/${REPO}.git" "$SHA"
-          git -C "$APP" cat-file -e "${SHA}^{commit}"
+            git -C "$APP" fetch -q --depth=1 --no-tags "https://github.com/${REPO}.git" "$SHA" \
+            || fail "cannot fetch the tag commit ${SHA}"
+          git -C "$APP" cat-file -e "${SHA}^{commit}" || fail "the fetch did not bring commit ${SHA}"
+          # The image config, validated before any rule runs.
+          if ! cfg_err="$("$CHECKS/content-tag.sh" --config "$APP" "$SHA" 2>&1 >/dev/null)"; then
+            fail "the image config at ${SHA} does not validate: ${cfg_err}"
+          fi
       - name: R0 release-review
         env:
           SHA: ${{ steps.commit.outputs.sha }}

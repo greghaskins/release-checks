@@ -58,7 +58,7 @@ case "$cmd" in
 
   r0)
     sha="${1:?}"
-    [[ "${REVIEWER_ID:-}" =~ ^[0-9]+$ ]] || die R0 "repository variable RELEASE_REVIEWER_ID is not set (the reviewer's bot account id)"
+    [[ "${REVIEWER_ID:-}" =~ ^[0-9]+$ ]] || die R0 "repository variable RELEASE_REVIEWER_ID is not set: the reviewer's bot account id, under Settings > Secrets and variables > Actions > Variables"
     # Statuses come newest first; only the reviewer's account counts (any
     # other account's release-review is ignored, spec 4).
     s="$(gh api --paginate "repos/${REPO}/commits/${sha}/statuses" \
@@ -163,7 +163,7 @@ case "$cmd" in
       echo "- digest: \`${digest}\`"
       echo "- reference: \`${image}:${ctag}@${digest}\`"
       echo "- tag commit: \`${sha}\`"
-      # The build args file (helperbot's versions.env), when the image has one.
+      # The build args file, when the image has one.
       # Read from the raw image.json at the tag, for this link only.
       if [ -n "${APP:-}" ]; then
         f="$(git -C "$APP" show "${sha}:.github/image.json" 2>/dev/null | jq -r '.build_args_file // empty' 2>/dev/null || true)"

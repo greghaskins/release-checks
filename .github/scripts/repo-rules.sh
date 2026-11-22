@@ -38,10 +38,17 @@ report "$out" "pull_request_target is not allowed in this repo"
 
 out=""
 for f in "${files[@]}"; do
-  # Names declared under on.workflow_call.secrets (parsed); a file that does
+  # Names declared under on.workflow_call.secrets (parsed), honoured only
+  # when workflow_call is the file's only trigger: on any other event a
+  # secrets.<NAME> would read this repository's own secret. A file that does
   # not parse fails here too.
-  if ! declared="$(yq -r '(.on.workflow_call.secrets // {}) | keys | .[]' "$f" 2>&1)"; then
-    out+="${f}: does not parse: ${declared}"$'\n'; continue
+  if ! on="$(yq -o=json '.on' "$f" 2>&1)" \
+     || ! triggers="$(jq -r 'if type == "string" then . elif type == "array" then .[] elif type == "object" then keys[] else empty end' <<<"$on" 2>&1)"; then
+    out+="${f}: does not parse: ${on}"$'\n'; continue
+  fi
+  declared=""
+  if [ "$triggers" = workflow_call ]; then
+    declared="$(jq -r 'if type == "object" then (.workflow_call.secrets // {} | keys[]) else empty end' <<<"$on")"
   fi
   allow='GITHUB_TOKEN'
   while IFS= read -r d; do

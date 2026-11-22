@@ -83,5 +83,23 @@ on:
         required: true
 jobs: {a: {runs-on: x, steps: [{run: x, env: {C: "${{ secrets.CFG_EXTRA }}"}}]}}
 Y
+case_ "a declared secret in a file that also runs on push fails" fail <<'Y'
+on:
+  push:
+  workflow_call:
+    secrets:
+      CFG:
+        required: true
+jobs: {a: {runs-on: x, steps: [{run: x, env: {C: "${{ secrets.CFG }}"}}]}}
+Y
+case_ "workflow_call alone, in list form, still allows it" pass <<'Y'
+on: [workflow_call]
+jobs: {a: {runs-on: x, steps: [{run: x}]}}
+Y
+case_ "a YAML anchor carrying secrets: inherit fails" fail <<'Y'
+on: push
+x-defaults: &d {secrets: inherit}
+jobs: {a: {<<: *d, uses: ./.github/workflows/x.yml}}
+Y
 echo "1..$n"
 exit $failed

@@ -198,6 +198,10 @@ cfg '{"image":"ghcr.io/example/app","dockerfile":"Dockerfile","paths":["Dockerfi
 expect "config: a key given twice" 1 "content-tag: config: .github/image.json: key paths is given twice" "$c" HEAD
 cfg '{"image":"ghcr.io/example/app","dockerfile":"Dockerfile","paths":["Dockerfile","src"],"pin_file":"deploy/kustomization.yaml","build_args":{"A":"1","A":"2"}}'
 expect "build-arg-duplicate: a key twice in build_args" 1 "content-tag: build-arg-duplicate: build_args: A is given twice" "$c" HEAD
+cfg '{"image":"ghcr.io/example/app","dockerfile":"Dockerfile","paths":["Dockerfile","src"],"pin_file":"deploy/kustomization.yaml","build_args":{"A":"1"},"build_args":{"B":"2"}}'
+expect "config: build_args twice, with different keys" 1 "content-tag: config: .github/image.json: key build_args is given twice" "$c" HEAD
+cfg "$(jq -c '.build_args = {"A": "x\u0000y"}' <<<"$base_cfg")"
+expect "build-arg-value: a NUL in a value" 1 "content-tag: build-arg-value: build_args: A's value" "$c" HEAD
 cfg "$(jq -c '.pin_file = "./deploy/kustomization.yaml" | .paths += ["deploy"]' <<<"$base_cfg")"
 expect "config: ./ in pin_file cannot dodge pin-file-in-set" 1 "content-tag: config: .github/image.json: pin_file './deploy/kustomization.yaml' must be a plain path" "$c" HEAD
 cfg "$(jq -c '.dockerfile = "src/../Dockerfile"' <<<"$base_cfg")"

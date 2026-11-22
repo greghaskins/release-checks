@@ -58,7 +58,12 @@ ds "after a BOM" fail '\xef\xbb\xbf# syntax=x\nFROM scratch\n'
 ds "allowlisted by digest" pass "# syntax=$P\nFROM scratch\n" "$P\n"
 ds "allowlisted name, other digest" fail "# syntax=docker/dockerfile:1.12@sha256:$(printf 'b%.0s' {1..64})\nFROM scratch\n" "$P\n"
 ds "after a comment, not a directive" pass '# hello\n# syntax=x\nFROM scratch\n'
-ds "after a blank line, not a directive" pass '\n# syntax=x\nFROM scratch\n'
+ds "blank lines before a syntax directive" fail '\n\n# syntax=x\nFROM scratch\n'
+ds "blank lines before a JSON body" fail '\n{"syntax":"x"}\n'
+ds "blank lines and spaces before a JSON body" fail '\n  \n\t{"syntax":"x"}\n'
+ds "blank lines before #!" fail '\n#!/x\n# syntax=x\nFROM scratch\n'
+ds "blank lines before //" fail '\n// syntax=x\nFROM scratch\n'
+ds "blank lines, then an instruction" pass '\n\nFROM scratch\n'
 ds "after an instruction" pass 'FROM scratch\n# syntax=x\n'
 ds "allowlisted by tag only" fail '# syntax=docker/dockerfile:1\nFROM scratch\n' 'docker/dockerfile:1\n'
 ds "a #! first line, then a syntax directive" fail '#!/usr/bin/env dockerfile\n# syntax=x\nFROM scratch\n'

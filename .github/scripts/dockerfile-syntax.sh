@@ -5,8 +5,10 @@
 # directives are `# key=value` comment lines at the very top, any case, with
 # spaces allowed around the key, `=` and value; an optional UTF-8 BOM first.
 # The first line that is not a directive (an instruction, a blank line, or a
-# comment that is not `key=value`) ends them. A first line starting with
-# `#!`, `//` or `{` fails: BuildKit can read directives in those forms too.
+# comment that is not `key=value`) ends them. Checks start at the first
+# non-whitespace byte (leading blank lines are skipped, as BuildKit does for
+# JSON). A file starting with `#!`, `//` or `{` fails: BuildKit can read
+# directives in those forms too.
 #
 #   dockerfile-syntax.sh <dockerfile> <allowlist>
 set -euo pipefail
@@ -16,22 +18,21 @@ if [ $# -ne 2 ]; then
   exit 2
 fi
 df="$1" allow="$2"
-first=1
+# The whole file, minus a UTF-8 BOM and any leading whitespace (blank lines
+# included): BuildKit skips them before a JSON body, so every check starts at
+# the first non-whitespace byte.
+content="$(cat -- "$df"; printf x)"; content="${content%x}"
+content="${content#$'\xef\xbb\xbf'}"
+content="${content#"${content%%[![:space:]]*}"}"
+# BuildKit also reads a directive after a `#!` line, in `//` comments, and
+# from a JSON body. No Dockerfile here needs any of them: refuse all three.
+case "$content" in
+  '#!'* | '//'* | '{'*)
+    echo "dockerfile-syntax: ${df}: starts with '${content:0:2}', a form BuildKit reads directives from; not allowed" >&2
+    exit 1 ;;
+esac
 while IFS= read -r line || [ -n "$line" ]; do
   line="${line%$'\r'}"
-  if [ "$first" = 1 ]; then
-    first=0
-    line="${line#$'\xef\xbb\xbf'}"
-    # BuildKit also reads a directive after a `#!` line, in `//` comments,
-    # and from a JSON first line. No Dockerfile here needs any of them, so
-    # refuse all three outright rather than parse them.
-    lead="${line#"${line%%[![:space:]]*}"}"
-    case "$lead" in
-      '#!'* | '//'* | '{'*)
-        echo "dockerfile-syntax: ${df}: the first line starts with '${lead:0:2}', a form BuildKit reads directives from; not allowed" >&2
-        exit 1 ;;
-    esac
-  fi
   if [[ "$line" =~ ^#[[:space:]]*([A-Za-z][A-Za-z0-9_-]*)[[:space:]]*=[[:space:]]*(.*[^[:space:]])[[:space:]]*$ ]]; then
     key="${BASH_REMATCH[1],,}" value="${BASH_REMATCH[2]}"
     if [ "$key" = syntax ]; then
@@ -45,5 +46,5 @@ while IFS= read -r line || [ -n "$line" ]; do
     continue
   fi
   break
-done < "$df"
+done <<<"$content"
 echo "dockerfile-syntax: ${df}: no syntax directive"

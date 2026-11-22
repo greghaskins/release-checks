@@ -5,7 +5,8 @@
 # directives are `# key=value` comment lines at the very top, any case, with
 # spaces allowed around the key, `=` and value; an optional UTF-8 BOM first.
 # The first line that is not a directive (an instruction, a blank line, or a
-# comment that is not `key=value`) ends them.
+# comment that is not `key=value`) ends them. A first line starting with
+# `#!`, `//` or `{` fails: BuildKit can read directives in those forms too.
 #
 #   dockerfile-syntax.sh <dockerfile> <allowlist>
 set -euo pipefail
@@ -17,8 +18,20 @@ fi
 df="$1" allow="$2"
 first=1
 while IFS= read -r line || [ -n "$line" ]; do
-  if [ "$first" = 1 ]; then line="${line#$'\xef\xbb\xbf'}"; first=0; fi
   line="${line%$'\r'}"
+  if [ "$first" = 1 ]; then
+    first=0
+    line="${line#$'\xef\xbb\xbf'}"
+    # BuildKit also reads a directive after a `#!` line, in `//` comments,
+    # and from a JSON first line. No Dockerfile here needs any of them, so
+    # refuse all three outright rather than parse them.
+    lead="${line#"${line%%[![:space:]]*}"}"
+    case "$lead" in
+      '#!'* | '//'* | '{'*)
+        echo "dockerfile-syntax: ${df}: the first line starts with '${lead:0:2}', a form BuildKit reads directives from; not allowed" >&2
+        exit 1 ;;
+    esac
+  fi
   if [[ "$line" =~ ^#[[:space:]]*([A-Za-z][A-Za-z0-9_-]*)[[:space:]]*=[[:space:]]*(.*[^[:space:]])[[:space:]]*$ ]]; then
     key="${BASH_REMATCH[1],,}" value="${BASH_REMATCH[2]}"
     if [ "$key" = syntax ]; then

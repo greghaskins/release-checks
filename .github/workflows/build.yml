@@ -149,6 +149,8 @@ jobs:
           fi
           echo "tag changed since the previous main: ${changed}"
           echo "changed=${changed}" >> "$GITHUB_OUTPUT"
+      - if: always()
+        run: docker logout ghcr.io >/dev/null 2>&1 || true
 
   build-amd64:
     needs: tag
@@ -250,7 +252,10 @@ jobs:
           set -euo pipefail
           for d in "$AMD64" "$ARM64"; do
             [[ "$d" =~ ^sha256:[0-9a-f]{64}$ ]] || { echo "::error::a build job gave '${d}', not a digest"; exit 1; }
-            docker buildx imagetools inspect "${IMAGE}@${d}" >/dev/null || { echo "::error::${IMAGE}@${d} is not in the registry"; exit 1; }
+            if ! msg="$(docker buildx imagetools inspect "${IMAGE}@${d}" 2>&1 >/dev/null)"; then
+              echo "::error::cannot confirm ${IMAGE}@${d} in the registry (registry error or missing): $(tr '\n' ' ' <<<"$msg")"
+              exit 1
+            fi
           done
           # No release-checks checkout here (no contents token): the same
           # classification as registry-state.sh, inline.
@@ -265,7 +270,7 @@ jobs:
                 return 1
               fi
               echo "found ${digest}"
-            elif grep -Eq 'MANIFEST_UNKNOWN|NAME_UNKNOWN|manifest unknown|name unknown|: not found$' "$err"; then
+            elif grep -Eq ': not found$' "$err"; then
               echo missing
             else
               echo "::error::cannot read ${IMAGE}:${TAG}: $(tr '\n' ' ' < "$err")" >&2; return 1

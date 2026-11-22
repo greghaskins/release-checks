@@ -61,6 +61,12 @@ ds "after a comment, not a directive" pass '# hello\n# syntax=x\nFROM scratch\n'
 ds "after a blank line, not a directive" pass '\n# syntax=x\nFROM scratch\n'
 ds "after an instruction" pass 'FROM scratch\n# syntax=x\n'
 ds "allowlisted by tag only" fail '# syntax=docker/dockerfile:1\nFROM scratch\n' 'docker/dockerfile:1\n'
+ds "a #! first line, then a syntax directive" fail '#!/usr/bin/env dockerfile\n# syntax=x\nFROM scratch\n'
+ds "a #! first line alone" fail '#!/usr/bin/env dockerfile\nFROM scratch\n'
+ds "a // syntax directive" fail '// syntax=x\nFROM scratch\n'
+ds "a // first line of any kind" fail '// hello\nFROM scratch\n'
+ds "a JSON first line" fail '{"syntax": "x"}\nFROM scratch\n'
+ds "a JSON first line after a BOM and spaces" fail '\xef\xbb\xbf  {"syntax": "x"}\nFROM scratch\n'
 ds "check directive is fine" pass '# check=skip=all\nFROM scratch\n'
 
 
@@ -78,7 +84,7 @@ case "$STUB" in
   missing-tag) echo 'ERROR: ghcr.io/x/y:r-1: not found' >&2; exit 1 ;;
   denied) echo 'ERROR: unexpected status from HEAD request to https://ghcr.io/v2/x/y/manifests/r-1: 403 Forbidden' >&2; exit 1 ;;
   server) echo 'ERROR: unexpected status from HEAD request to https://ghcr.io/v2/x/y/manifests/r-1: 500 Internal Server Error' >&2; exit 1 ;;
-  manifest-unknown) echo 'ERROR: ghcr.io/x/y:r-1: not found: MANIFEST_UNKNOWN: manifest unknown' >&2; exit 1 ;;
+  manifest-unknown) echo 'ERROR: failed to resolve: MANIFEST_UNKNOWN: manifest unknown' >&2; exit 1 ;;
   net) echo 'ERROR: dial tcp: lookup ghcr.io: no such host' >&2; exit 1 ;;
 esac
 STUB
@@ -93,7 +99,7 @@ rs "an index with an attestation entry fails" attest 1 ""
 rs "a single-platform manifest fails" single 1 ""
 rs "an arm64 variant does not count as linux/arm64" variant 1 ""
 rs "ghcr's 'not found' is missing" missing-tag 0 missing
-rs "MANIFEST_UNKNOWN wording is missing too" manifest-unknown 0 missing
+rs "only ': not found' is missing; other wording is an error" manifest-unknown 1 ""
 rs "403 is an error, not missing" denied 1 ""
 rs "500 is an error" server 1 ""
 rs "a network error is an error" net 1 ""

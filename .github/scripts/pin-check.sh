@@ -72,7 +72,12 @@ pin_of() {
   if ! grep -qx '#entry' <<<"$entry"; then
     # No entry for IMAGE: unpinned, unless the file names IMAGE some other
     # way this parser does not follow (then say so, never read it as unpinned).
-    if grep -qF -- "$IMAGE" <<<"$c"; then
+    # Comment lines don't count: a kustomization may describe the image in a
+    # comment before it pins it.
+    # Filtered into a variable first: `grep -v | grep -q` under pipefail
+    # fails on SIGPIPE for a large file and would read as "no mention".
+    nc="$(grep -v -E '^[[:space:]]*#' <<<"$c" || true)"
+    if grep -qF -- "$IMAGE" <<<"$nc"; then
       echo "names ${IMAGE}, but not in an images entry this check can read (- name: ${IMAGE}, then newTag and digest)" >&2
       return 1
     fi

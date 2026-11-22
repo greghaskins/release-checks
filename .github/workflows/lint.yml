@@ -39,3 +39,5 @@ jobs:
           echo "$RUNNER_TEMP/bin" >> "$GITHUB_PATH"
       - name: tests
         run: bash .github/scripts/test.sh
+      - name: build tests
+        run: bash .github/scripts/build.test.sh

@@ -1,0 +1,2 @@
+# Dockerfile frontends a `# syntax=` directive may name, each pinned by
+# digest, one per line (dockerfile-syntax.sh). Empty: none.

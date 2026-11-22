@@ -26,6 +26,40 @@ jobs:
 Per-repo settings, such as the content-tag inputs and the image name, are inputs
 set in your workflow. Keep them under `.github/`.
 
+### Content tag
+
+`.github/scripts/content-tag.sh <repo root> <inputs file> [rev]` prints
+`x-<16 hex>`: the first 16 hex digits of a SHA-256 over one line per input,
+`path<TAB>git object id`, sorted bytewise. The inputs file lists one path per
+line (a file or a whole directory); `#` lines and blank lines are skipped. A
+missing path is an error that names it. Never list the pin file: pinning would
+change the tag it pins.
+
+Image jobs, the `pin` check and a bot's pin script all run this one script, at
+the SHA the caller pins, so they cannot disagree on a tag.
+
+### `pin`
+
+`.github/workflows/pin.yml` checks, for the caller's commit:
+
+| Rule | Holds when | Usual fix |
+|---|---|---|
+| 1 | the pin file's `newTag` is this tree's content tag | run the pin script |
+| 2 | the registry has that tag, under the pinned `digest` | wait for the image job, then run the pin script |
+| 3 | the render references the image only as `...@<pinned digest>` | set the image only in the `images` entry |
+| 4 | a tag the base already pins keeps its digest | escalate to the repo owner |
+
+Each failure prints its rule, what is wrong and the fix. Inputs: `inputs-file`,
+`image`, `pin-file`, and optionally `render-dir`, `drop-components` (render
+without the kustomization's top-level `components:`, for ones CI cannot fetch)
+and `pin-fix` (your repo's re-pin command, shown in failures).
+
+The workflow reads the commit it runs at from `job.workflow_sha` and checks this
+repo out there for its scripts. If that context is ever empty, set the
+`release-checks-sha` input to the SHA in your `uses:` line.
+
+The check shows up as `<your job> / pin`; require that name in your rulesets.
+
 ## Rules
 
 - Everything a gate decides with lives in this repo or in the caller's

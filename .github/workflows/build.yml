@@ -259,8 +259,10 @@ jobs:
               local digest plats
               digest="$(jq -r '.digest // empty' <<<"$out")"
               plats="$(jq -r '[.manifests[]? | "\(.platform.os)/\(.platform.architecture)\(if .platform.variant then "/" + .platform.variant else "" end)"] | sort | join(" ")' <<<"$out")"
-              [[ "$digest" =~ ^sha256:[0-9a-f]{64}$ ]] && [ "$plats" = "linux/amd64 linux/arm64" ] \
-                || { echo "::error::${IMAGE}:${TAG} is ${digest:-?}, not an index of exactly linux/amd64 and linux/arm64 (${plats:-none})" >&2; return 1; }
+              if ! [[ "$digest" =~ ^sha256:[0-9a-f]{64}$ ]] || [ "$plats" != "linux/amd64 linux/arm64" ]; then
+                echo "::error::${IMAGE}:${TAG} is ${digest:-?}, not an index of exactly linux/amd64 and linux/arm64 (${plats:-none})" >&2
+                return 1
+              fi
               echo "found ${digest}"
             elif grep -Eq 'MANIFEST_UNKNOWN|NAME_UNKNOWN|manifest unknown|name unknown|: not found$' "$err"; then
               echo missing

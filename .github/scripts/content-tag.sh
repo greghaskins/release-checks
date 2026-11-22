@@ -33,10 +33,15 @@
 # Exit 1 on a rule, with "content-tag: <rule>: <detail>" on stderr. Rules:
 #   config, pathspec-magic, no-match, no-dockerfile, no-build-args-file,
 #   pin-file-in-set, submodule, control-byte, symlink-escape, build-arg-key,
-#   build-arg-duplicate, build-arg-value.
+#   build-arg-duplicate, build-arg-value. control-byte covers paths, symlink
+#   targets and every string in the config. CONTENT_TAG is a reserved build
+#   arg (build-arg-key).
 # Exit 2 on a usage error. Needs git, jq and sha256sum.
 set -euo pipefail
 export LC_ALL=C
+# These change what a pathspec means; the tag must not depend on the caller's
+# environment.
+unset GIT_GLOB_PATHSPECS GIT_NOGLOB_PATHSPECS GIT_LITERAL_PATHSPECS GIT_ICASE_PATHSPECS
 
 scheme="release-checks content tag 1"
 config_path=".github/image.json"
@@ -76,9 +81,35 @@ problem="$(jq -r '
   end' <<<"$raw" 2>&1)" || rule config "${config_path} is not valid JSON: ${problem}"
 [ -z "$problem" ] || rule config "${config_path}: ${problem}"
 
+# Duplicate keys, which a JSON parser would silently collapse to the last.
+# A repeated key shows as the same leaf path twice in jq's event stream.
+dup="$(jq -c --stream 'select(length == 2) | .[0]' <<<"$raw" | sort | uniq -d | head -1)"
+if [ -n "$dup" ]; then
+  if [ "$(jq -r '.[0]' <<<"$dup")" = build_args ]; then
+    rule build-arg-duplicate "build_args: $(jq -r '.[1]' <<<"$dup") is given twice"
+  fi
+  rule config "${config_path}: key $(jq -r '.[0]' <<<"$dup") is given twice"
+fi
+# No control byte in any string of the config (build arg values are left to
+# build-arg-value, below): a newline in a pathspec would
+# make two, and one in a name or path would forge output lines.
+bad="$(jq -r '[paths(type == "string") as $p | select($p[0] != "build_args") | select(getpath($p) | test("[\u0000-\u001f]")) | $p | map(tostring) | join(".")] | first // empty' <<<"$raw")"
+[ -z "$bad" ] || rule control-byte "${config_path}: ${bad} holds a byte below 0x20"
+bad="$(jq -r '[(.build_args // {}) | keys[] | select(test("[\u0000-\u001f]"))] | first // empty' <<<"$raw")"
+[ -z "$bad" ] || rule control-byte "${config_path}: a build_args key holds a byte below 0x20"
+
 dockerfile="$(jq -r .dockerfile <<<"$raw")"
 pin_file="$(jq -r .pin_file <<<"$raw")"
 args_file="$(jq -r '.build_args_file // ""' <<<"$raw")"
+# File paths in the config must be written as git lists them, or a check by
+# name (pin-file-in-set, no-dockerfile) could miss: no leading /, ./ or
+# trailing /, no empty, . or .. segment.
+for f in "dockerfile:$dockerfile" "pin_file:$pin_file" ${args_file:+"build_args_file:$args_file"}; do
+  v="${f#*:}"
+  case "/$v/" in
+    //* | */./* | */../* | *//*) rule config "${config_path}: ${f%%:*} '${v}' must be a plain path from the repo root, like dir/file" ;;
+  esac
+done
 mapfile -t paths < <(jq -r '.paths[]' <<<"$raw")
 
 # --- pathspecs: only glob and exclude magic ---------------------------------
@@ -154,7 +185,13 @@ for rec in "${records[@]}"; do
   [ "${rec%% *}" = 120000 ] || continue
   path="${rec#*"$tab"}"
   oid="${rec%%"$tab"*}"; oid="${oid#* }"
-  target="$(g cat-file blob "$oid")"
+  # Read the target exactly: $( ) would drop NUL bytes and trailing
+  # newlines, and later reads would see only the first line.
+  size="$(g cat-file -s "$oid")"
+  target="$(g cat-file blob "$oid"; printf x)"; target="${target%x}"
+  if [ "${#target}" -ne "$size" ] || [[ "$target" =~ $ctl ]]; then
+    rule control-byte "the symlink ${path} has a target with a byte below 0x20"
+  fi
   [[ "$target" == /* ]] && rule symlink-escape "${path} -> ${target} is absolute"
   base="$(dirname "$path")"; [ "$base" = . ] && base=""
   IFS=/ read -r -a parts <<<"${base:+$base/}${target}"
@@ -177,6 +214,7 @@ check_arg() { # source key value
   local src="$1" k="$2" v="$3"
   [[ "$k" =~ ^[A-Z][A-Z0-9_]*$ ]] || rule build-arg-key "${src}: '${k}' must match ^[A-Z][A-Z0-9_]*\$"
   [[ "$k" == BUILDKIT_* ]] && rule build-arg-key "${src}: ${k} starts with BUILDKIT_"
+  [ "$k" = CONTENT_TAG ] && rule build-arg-key "${src}: CONTENT_TAG is reserved; the build sets it"
   case "$k" in
     HTTP_PROXY | HTTPS_PROXY | FTP_PROXY | NO_PROXY | ALL_PROXY)
       rule build-arg-key "${src}: ${k} is a predefined proxy arg, left out of BuildKit's cache key" ;;

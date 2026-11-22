@@ -67,12 +67,27 @@ jobs:
       - name: Which commits
         id: commits
         env:
-          HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
-          BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.before }}
+          EVENT: ${{ github.event_name }}
+          PR_HEAD: ${{ github.event.pull_request.head.sha }}
+          PR_BASE: ${{ github.event.pull_request.base.sha }}
+          QUEUE_BASE: ${{ github.event.merge_group.base_sha }}
+          BEFORE: ${{ github.event.before }}
+          SHA: ${{ github.sha }}
         run: |
           set -euo pipefail
-          base="$BASE_SHA"
-          if ! [[ "$base" =~ ^[0-9a-f]{40}$ ]] || [ "$base" = 0000000000000000000000000000000000000000 ]; then base=""; fi
+          # Rule 4 needs the right base, so only events whose base is known.
+          case "$EVENT" in
+            pull_request) HEAD_SHA="$PR_HEAD"; base="$PR_BASE" ;;
+            merge_group) HEAD_SHA="$SHA"; base="$QUEUE_BASE" ;;
+            push) HEAD_SHA="$SHA"; base="$BEFORE"
+              # A new branch has no before.
+              [ "$base" = 0000000000000000000000000000000000000000 ] && base="" ;;
+            *) echo "::error::pin runs on pull_request, merge_group and push, not ${EVENT}: it cannot tell the base for rule 4"; exit 1 ;;
+          esac
+          if ! [[ "$HEAD_SHA" =~ ^[0-9a-f]{40}$ ]] || { [ -n "$base" ] && ! [[ "$base" =~ ^[0-9a-f]{40}$ ]]; }; then
+            echo "::error::unexpected commit ids from the ${EVENT} event: head '${HEAD_SHA}', base '${base}'"
+            exit 1
+          fi
           echo "head ${HEAD_SHA}, base ${base:-none}"
           {
             echo "head=${HEAD_SHA}"

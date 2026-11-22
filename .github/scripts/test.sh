@@ -173,6 +173,42 @@ printf 'A=$(echo hi) "q"\n' > "$c/src/args"; commit "$c"
 # shellcheck disable=SC2016
 [ "$("$ct" --build-args "$c" HEAD)" = 'A=$(echo hi) "q"' ] && ok "build_args_file values are data, verbatim" || bad "build_args_file value changed"
 
+# Review fixes: exact symlink targets, control bytes and duplicates in the
+# config, plain config paths, the caller's environment, CONTENT_TAG.
+cfg "$base_cfg"
+# A symlink target can hold any bytes: make one with a newline in it.
+blob="$(printf 'ok\n/../../../etc/passwd' | git -C "$c" hash-object -w --stdin)"
+git -C "$c" update-index --add --cacheinfo "120000,${blob},src/sneaky"
+git -C "$c" commit -q -m sneaky
+expect "control-byte: a symlink target with a newline (not just its first line)" 1 "content-tag: control-byte: the symlink src/sneaky" "$c" HEAD
+git -C "$c" rm -q --cached src/sneaky && commit "$c"
+blob="$(printf 'main.go\0x' | git -C "$c" hash-object -w --stdin)"
+git -C "$c" update-index --add --cacheinfo "120000,${blob},src/nul"
+git -C "$c" commit -q -m nul
+expect "control-byte: a symlink target with a NUL" 1 "content-tag: control-byte: the symlink src/nul" "$c" HEAD 2>/dev/null
+git -C "$c" rm -q --cached src/nul && commit "$c"
+
+cfg "$(jq -c '.paths = ["Dockerfile\nsrc"]' <<<"$base_cfg")"
+expect "control-byte: a newline in a pathspec" 1 "content-tag: control-byte: .github/image.json: paths.0" "$c" HEAD
+cfg "$(jq -c '.image = "ghcr.io/x\ny"' <<<"$base_cfg")"
+expect "control-byte: a newline in image" 1 "content-tag: control-byte: .github/image.json: image" "$c" HEAD
+cfg "$(jq -c '.pin_file = "deploy/k\ty"' <<<"$base_cfg")"
+expect "control-byte: a TAB in pin_file" 1 "content-tag: control-byte: .github/image.json: pin_file" "$c" HEAD
+cfg '{"image":"ghcr.io/example/app","dockerfile":"Dockerfile","paths":["Dockerfile"],"paths":["Dockerfile","src"],"pin_file":"deploy/kustomization.yaml"}'
+expect "config: a key given twice" 1 "content-tag: config: .github/image.json: key paths is given twice" "$c" HEAD
+cfg '{"image":"ghcr.io/example/app","dockerfile":"Dockerfile","paths":["Dockerfile","src"],"pin_file":"deploy/kustomization.yaml","build_args":{"A":"1","A":"2"}}'
+expect "build-arg-duplicate: a key twice in build_args" 1 "content-tag: build-arg-duplicate: build_args: A is given twice" "$c" HEAD
+cfg "$(jq -c '.pin_file = "./deploy/kustomization.yaml" | .paths += ["deploy"]' <<<"$base_cfg")"
+expect "config: ./ in pin_file cannot dodge pin-file-in-set" 1 "content-tag: config: .github/image.json: pin_file './deploy/kustomization.yaml' must be a plain path" "$c" HEAD
+cfg "$(jq -c '.dockerfile = "src/../Dockerfile"' <<<"$base_cfg")"
+expect "config: .. in dockerfile" 1 "content-tag: config: .github/image.json: dockerfile" "$c" HEAD
+cfg "$(jq -c '.build_args = {"CONTENT_TAG": "x"}' <<<"$base_cfg")"
+expect "build-arg-key: CONTENT_TAG is reserved" 1 "content-tag: build-arg-key: build_args: CONTENT_TAG is reserved" "$c" HEAD
+cfg "$(jq -c '.paths = ["Dockerfile", "src/*.go"]' <<<"$base_cfg")"
+t1="$("$ct" "$c" HEAD)"
+t2="$(GIT_LITERAL_PATHSPECS=1 GIT_ICASE_PATHSPECS=1 "$ct" "$c" HEAD)"
+[ "$t1" = "$t2" ] && ok "GIT_*_PATHSPECS in the environment do not change the tag" || bad "GIT_*_PATHSPECS changed the tag ($t1 vs $t2)"
+
 # --- pin-check.sh -------------------------------------------------------------
 img=ghcr.io/example/app
 p="$work/pin"

@@ -334,6 +334,13 @@ commit "$p"
 pin "$tag" "$D_B"
 check "rule 4: unreadable base entry fails, not read as unpinned" "4" "not in an images entry this check can read"
 
+# A base that only mentions the image in a comment has no pin yet (the first
+# pin lands here): rule 4 has nothing to compare, it is not malformed.
+{ printf '# The driver image %s:unset is a placeholder until pinned.\n' "$img"; printf 'resources:\n  - deployment.yaml\n'; } > "$p/deploy/kustomization.yaml"
+commit "$p"
+pin "$tag" "$D_B"
+check "rule 4: a base that names the image only in a comment is unpinned" ""
+
 # Components: remote entries are dropped for the render, local ones stay.
 pin "$tag" "$D_B"
 { printf 'components:\n  - https://example.invalid//nope?ref=1\n'; kust "$tag" "$D_B"; } > "$p/deploy/kustomization.yaml"

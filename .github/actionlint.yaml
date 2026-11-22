@@ -1,6 +1,6 @@
 # actionlint 1.7.12 (pinned in lint.yml) predates the job.workflow_repository
 # and job.workflow_sha contexts that pin.yml and build.yml read to find the
-# release-checks commit they run at, and the concurrency `queue` key that
+# release-checks commit they run at (release.yml too), and the concurrency `queue` key that
 # build.yml uses (GitHub accepts it in a called workflow and runs the queued
 # jobs one by one, none cancelled; tested). Ignore exactly those
 # errors, in those files only.
@@ -12,3 +12,12 @@ paths:
     ignore:
       - 'property "workflow_(repository|sha)" is not defined in object type'
       - 'unexpected key "queue" for "concurrency" section'
+  .github/workflows/release.yml:
+    ignore:
+      - 'property "workflow_(repository|sha)" is not defined in object type'
+  .github/workflows/secret-scan.yml:
+    ignore:
+      - 'property "workflow_(repository|sha)" is not defined in object type'
+  .github/workflows/secret-scan-text.yml:
+    ignore:
+      - 'property "workflow_(repository|sha)" is not defined in object type'

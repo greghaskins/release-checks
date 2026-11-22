@@ -1,0 +1,150 @@
+# The release job, shared: a reviewed `v*` tag publishes the GitHub Release.
+# An app calls it on a `v*` tag push, at the same full SHA as build.yml and
+# pin.yml, after its release-checks-ref job, with
+#   permissions: {contents: write, statuses: read, checks: read, packages: read}
+#   with: {reviewer-id: "${{ vars.RELEASE_REVIEWER_ID }}"}
+#
+# One job. The app's code never runs: the tag commit is fetched into an empty
+# repository (no checkout, no work tree, no hooks) only to read
+# .github/image.json and the pin file it names. The rules (release.sh):
+#   R0  the latest release-review from the reviewer's account is a success
+#       whose first word is the tag
+#   R1  the tag is vMAJOR.MINOR.PATCH; it descends from its predecessor, the
+#       highest lower v* tag with a Release by github-actions[bot]
+#   R2  the tag commit is on main
+#   R3  the pin file at the tag names an r- tag whose index digest the
+#       registry still returns
+# Then the Release is created once, with generated notes plus the content
+# tag, digest and tag commit. Nothing edits a Release: a re-run skips one this
+# job already made for the same commit and digest, and fails on any other.
+# A failed run is re-run once the cause is fixed, or the next version is
+# released. Tags never move.
+name: release
+
+on:
+  workflow_call:
+    inputs:
+      reviewer-id:
+        description: The release reviewer's bot account id (the caller passes vars.RELEASE_REVIEWER_ID)
+        type: string
+        required: false
+        default: ""
+
+permissions: {}
+
+jobs:
+  release:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: write
+      statuses: read
+      checks: read
+      packages: read
+    env:
+      GH_TOKEN: ${{ github.token }}
+      REPO: ${{ github.repository }}
+      TAG: ${{ github.ref_name }}
+      REVIEWER_ID: ${{ inputs.reviewer-id }}
+      APP: ${{ github.workspace }}/app
+      CHECKS: ${{ github.workspace }}/checks/.github/scripts
+    steps:
+      - name: Which release-checks, which event
+        id: checks
+        env:
+          RC_REPO: ${{ job.workflow_repository }}
+          RC_SHA: ${{ job.workflow_sha }}
+          EVENT: ${{ github.event_name }}
+          REF_TYPE: ${{ github.ref_type }}
+        run: |
+          set -euo pipefail
+          if [ "$EVENT" != push ] || [ "$REF_TYPE" != tag ]; then
+            echo "::error::release runs on a tag push, not ${EVENT} of a ${REF_TYPE}"
+            echo "- release: runs on a tag push, not ${EVENT} of a ${REF_TYPE}" >> "$GITHUB_STEP_SUMMARY"; exit 1
+          fi
+          if [ -z "$RC_REPO" ] || ! [[ "$RC_SHA" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "::error::cannot tell which release-checks commit this is (job.workflow_repository '${RC_REPO}', job.workflow_sha '${RC_SHA}')"; exit 1
+          fi
+          { echo "repo=${RC_REPO}"; echo "sha=${RC_SHA}"; } >> "$GITHUB_OUTPUT"
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: ${{ steps.checks.outputs.repo }}
+          ref: ${{ steps.checks.outputs.sha }}
+          path: checks
+          persist-credentials: false
+      - name: The tag commit
+        id: commit
+        # Assigned first, so a failing rule fails the step.
+        run: |
+          set -euo pipefail
+          sha="$("$CHECKS/release.sh" commit)"
+          echo "sha=${sha}" >> "$GITHUB_OUTPUT"
+      # Objects only: an empty repository, one fetch with this job's token on
+      # that command alone, no checkout, so no app file is written or run.
+      - name: Fetch the tag commit
+        env:
+          SHA: ${{ steps.commit.outputs.sha }}
+        run: |
+          set -euo pipefail
+          git init -q "$APP"
+          auth="AUTHORIZATION: basic $(printf 'x-access-token:%s' "$GH_TOKEN" | base64 -w0)"
+          echo "::add-mask::$auth"
+          fail() { echo "::error::$1"; echo "- release ${TAG}: $1" >> "$GITHUB_STEP_SUMMARY"; exit 1; }
+          GIT_CONFIG_COUNT=2 GIT_CONFIG_KEY_0=http.https://github.com/.extraheader GIT_CONFIG_VALUE_0="$auth" \
+            GIT_CONFIG_KEY_1=core.hooksPath GIT_CONFIG_VALUE_1=/dev/null \
+            git -C "$APP" fetch -q --depth=1 --no-tags "https://github.com/${REPO}.git" "$SHA" \
+            || fail "cannot fetch the tag commit ${SHA}"
+          git -C "$APP" cat-file -e "${SHA}^{commit}" || fail "the fetch did not bring commit ${SHA}"
+          # The image config, validated before any rule runs.
+          if ! cfg_err="$("$CHECKS/content-tag.sh" --config "$APP" "$SHA" 2>&1 >/dev/null)"; then
+            fail "the image config at ${SHA} does not validate: ${cfg_err}"
+          fi
+      - name: R0 release-review
+        env:
+          SHA: ${{ steps.commit.outputs.sha }}
+        run: '"$CHECKS/release.sh" r0 "$SHA"'
+      - name: R1 SemVer and predecessor
+        id: r1
+        env:
+          SHA: ${{ steps.commit.outputs.sha }}
+        run: |
+          set -euo pipefail
+          pred="$("$CHECKS/release.sh" r1 "$SHA")"
+          echo "pred=${pred}" >> "$GITHUB_OUTPUT"
+      - name: R2 on main
+        env:
+          SHA: ${{ steps.commit.outputs.sha }}
+        run: '"$CHECKS/release.sh" r2 "$SHA"'
+      - name: Registry login (read)
+        env:
+          ACTOR: ${{ github.actor }}
+        run: printf '%s' "$GH_TOKEN" | docker login ghcr.io -u "$ACTOR" --password-stdin
+      - name: R3 pin and registry
+        id: r3
+        env:
+          SHA: ${{ steps.commit.outputs.sha }}
+        run: |
+          set -euo pipefail
+          out="$("$CHECKS/release.sh" r3 "$SHA")"
+          read -r image tag digest <<<"$out"
+          { echo "image=${image}"; echo "tag=${tag}"; echo "digest=${digest}"; } >> "$GITHUB_OUTPUT"
+      - name: Already released?
+        id: existing
+        env:
+          SHA: ${{ steps.commit.outputs.sha }}
+          DIGEST: ${{ steps.r3.outputs.digest }}
+        run: |
+          set -euo pipefail
+          do="$("$CHECKS/release.sh" existing "$SHA" "$DIGEST")"
+          echo "do=${do}" >> "$GITHUB_OUTPUT"
+      - name: Publish the Release
+        if: steps.existing.outputs.do == 'create'
+        env:
+          SHA: ${{ steps.commit.outputs.sha }}
+          PRED: ${{ steps.r1.outputs.pred }}
+          IMAGE: ${{ steps.r3.outputs.image }}
+          CONTENT_TAG: ${{ steps.r3.outputs.tag }}
+          DIGEST: ${{ steps.r3.outputs.digest }}
+        run: '"$CHECKS/release.sh" publish "$SHA" "$PRED" "$IMAGE" "$CONTENT_TAG" "$DIGEST"'
+      - if: always()
+        run: docker logout ghcr.io >/dev/null 2>&1 || true

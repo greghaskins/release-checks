@@ -82,7 +82,15 @@ problem="$(jq -r '
 [ -z "$problem" ] || rule config "${config_path}: ${problem}"
 
 # Duplicate keys, which a JSON parser would silently collapse to the last.
-# A repeated key shows as the same leaf path twice in jq's event stream.
+# A repeated key, which a JSON parser would collapse to its last value. At the
+# top level, a key's events in jq's stream form one run, so a key in two runs
+# was given twice (even with different contents). Below, a repeated key shows
+# as the same leaf path twice.
+# Also, each object or array value ends with exactly one closing event, so a
+# key with two closing events was given twice, even when adjacent.
+top="$(jq -r --stream '.[0][0] // empty | tostring' <<<"$raw" | uniq | sort | uniq -d | head -1)"
+[ -n "$top" ] || top="$(jq -r --stream 'select(length == 1 and (.[0] | length) == 2) | .[0][0] | tostring' <<<"$raw" | sort | uniq -d | head -1)"
+[ -z "$top" ] || rule config "${config_path}: key ${top} is given twice"
 dup="$(jq -c --stream 'select(length == 2) | .[0]' <<<"$raw" | sort | uniq -d | head -1)"
 if [ -n "$dup" ]; then
   if [ "$(jq -r '.[0]' <<<"$dup")" = build_args ]; then
@@ -209,6 +217,9 @@ for rec in "${records[@]}"; do
 done
 
 # --- build args --------------------------------------------------------------
+# Checked in jq first: a NUL in a value would end it early once in the shell.
+bad="$(jq -r '[(.build_args // {}) | to_entries[] | select(.value | test("[\u0000-\u001f]")) | .key] | first // empty' <<<"$raw")"
+[ -z "$bad" ] || rule build-arg-value "build_args: ${bad}'s value holds a byte below 0x20"
 declare -A args=()
 check_arg() { # source key value
   local src="$1" k="$2" v="$3"

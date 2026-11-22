@@ -230,6 +230,7 @@ jobs:
     concurrency:
       group: build-merge-${{ github.repository }}-${{ needs.tag.outputs.image }}-${{ needs.tag.outputs.tag }}
       cancel-in-progress: false
+      queue: max
     outputs:
       digest: ${{ steps.merge.outputs.digest }}
     steps:
@@ -329,6 +330,7 @@ jobs:
     concurrency:
       group: build-cache-${{ github.repository }}-${{ needs.tag.outputs.image }}-amd64
       cancel-in-progress: false
+      queue: max
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -341,7 +343,14 @@ jobs:
           ref: ${{ needs.tag.outputs.checks-sha }}
           path: checks
           persist-credentials: false
+      # A job timeout would end this job "cancelled", which continue-on-error
+      # does not cover: the whole caller run would show cancelled (tested).
+      # A step timeout below the job's, with the step's own continue-on-error,
+      # keeps the job and the caller green.
       - name: Write the build cache
+        id: cache
+        timeout-minutes: 25
+        continue-on-error: true
         env:
           ARCH: amd64
           COMMIT: ${{ needs.tag.outputs.commit }}
@@ -351,7 +360,7 @@ jobs:
           ACTOR: ${{ github.actor }}
           REPO: ${{ github.repository }}
         run: checks/.github/scripts/build-image.sh cache
-      - if: failure()
+      - if: steps.cache.outcome != 'success'
         run: |
           echo "::warning::the amd64 build cache was not written; the next build runs cold"
           echo "- warning: the amd64 build cache was not written" >> "$GITHUB_STEP_SUMMARY"
@@ -370,6 +379,7 @@ jobs:
     concurrency:
       group: build-cache-${{ github.repository }}-${{ needs.tag.outputs.image }}-arm64
       cancel-in-progress: false
+      queue: max
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -382,7 +392,14 @@ jobs:
           ref: ${{ needs.tag.outputs.checks-sha }}
           path: checks
           persist-credentials: false
+      # A job timeout would end this job "cancelled", which continue-on-error
+      # does not cover: the whole caller run would show cancelled (tested).
+      # A step timeout below the job's, with the step's own continue-on-error,
+      # keeps the job and the caller green.
       - name: Write the build cache
+        id: cache
+        timeout-minutes: 25
+        continue-on-error: true
         env:
           ARCH: arm64
           COMMIT: ${{ needs.tag.outputs.commit }}
@@ -392,7 +409,7 @@ jobs:
           ACTOR: ${{ github.actor }}
           REPO: ${{ github.repository }}
         run: checks/.github/scripts/build-image.sh cache
-      - if: failure()
+      - if: steps.cache.outcome != 'success'
         run: |
           echo "::warning::the arm64 build cache was not written; the next build runs cold"
           echo "- warning: the arm64 build cache was not written" >> "$GITHUB_STEP_SUMMARY"

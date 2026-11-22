@@ -160,6 +160,37 @@ commit "$p"
 out="$(cd "$p" && DROP_COMPONENTS=true INPUTS=.github/image-inputs IMAGE="$img" PIN_FILE=deploy/kustomization.yaml INSPECT="$work/inspect" "$pc" 2>&1)" \
   && ok "drop-components renders without the remote component" || { bad "drop-components"; printf '%s\n' "$out" | sed 's/^/    /'; }
 
+# A local component stays in the render: one that sets the image is caught.
+mkdir -p "$p/deploy/comp"
+# The component adds a reference the images transformer does not rewrite.
+printf 'apiVersion: v1\nkind: ConfigMap\nmetadata: {name: evil}\ndata:\n  spec: |\n    image: %s:evil\n' "$img" > "$p/deploy/comp/cm.yaml"
+printf 'apiVersion: kustomize.config.k8s.io/v1alpha1\nkind: Component\nresources:\n  - cm.yaml\n' > "$p/deploy/comp/kustomization.yaml"
+{ printf 'components:\n  - comp\n  - https://example.invalid//nope?ref=1\n'; kust "$tag" "$D_B"; } > "$p/deploy/kustomization.yaml"
+commit "$p"
+out="$(cd "$p" && DROP_COMPONENTS=true INPUTS=.github/image-inputs IMAGE="$img" PIN_FILE=deploy/kustomization.yaml INSPECT="$work/inspect" "$pc" 2>&1)" \
+  && { bad "a local component's image reference was not rendered"; printf '%s\n' "$out" | sed 's/^/    /'; } \
+  || { grep -q '^pin rule 3' <<<"$out" && ok "drop-components keeps local components in the render" || { bad "local component: wrong failure"; printf '%s\n' "$out" | sed 's/^/    /'; }; }
+rm -r "$p/deploy/comp"
+
+# Rule 3 matches the image name exactly, not as a prefix.
+pin "$tag" "$D_B"
+printf 'apiVersion: v1\nkind: ConfigMap\nmetadata: {name: c}\ndata:\n  spec: |\n    image: ghcr.io/example/app-sidecar:latest\n' > "$p/deploy/cm.yaml"
+kust "$tag" "$D_B" | sed 's/^  - deployment.yaml$/  - deployment.yaml\n  - cm.yaml/' > "$p/deploy/kustomization.yaml"
+commit "$p"
+check "rule 3 ignores another image that shares the prefix" ""
+rm "$p/deploy/cm.yaml"
+
+# A base that names the image in a way the parser cannot read fails rule 4.
+printf 'resources:\n  - deployment.yaml\nimages:\n- {name: %s, newTag: %s, digest: %s}\n' "$img" "$tag" "$D_A" > "$p/deploy/kustomization.yaml"
+commit "$p"
+pin "$tag" "$D_B"
+check "rule 4: unreadable base entry fails, not read as unpinned" "4" "not in an images entry this check can read"
+
+# A missing registry command is not "not built".
+out="$(cd "$p" && INPUTS=.github/image-inputs IMAGE="$img" PIN_FILE=deploy/kustomization.yaml INSPECT="$work/no-such-command" "$pc" 2>&1)" || true
+grep -q 'pin rule 2: the registry command .* is not installed' <<<"$out" && ! grep -q 'not built' <<<"$out" \
+  && ok "a missing registry command is reported as such" || { bad "missing registry command"; printf '%s\n' "$out" | sed 's/^/    /'; }
+
 if [ "$fails" -gt 0 ]; then
   echo "$fails test(s) failed"
   exit 1

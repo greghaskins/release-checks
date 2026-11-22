@@ -62,12 +62,24 @@ pin_of() {
   # list item or a line indented less than the entry's keys.
   entry="$(awk -v img="$IMAGE" '
     match($0, /^[[:space:]]*- name:[[:space:]]*/) {
-      inside = (substr($0, RLENGTH + 1) == img); ind = RLENGTH - length("name: "); next
+      inside = (substr($0, RLENGTH + 1) == img); ind = RLENGTH - length("name: ")
+      if (inside) print "#entry"
+      next
     }
     inside && /^[[:space:]]*$/ { next }
     inside { match($0, /^[[:space:]]*/); if (RLENGTH <= ind - 2 || $0 ~ /^[[:space:]]*- /) inside = 0 }
     inside { print }
   ' <<<"$c")"
+  if ! grep -qx '#entry' <<<"$entry"; then
+    # No entry for IMAGE: unpinned, unless the file names IMAGE some other
+    # way this parser does not follow (then say so, never read it as unpinned).
+    if grep -qF -- "$IMAGE" <<<"$c"; then
+      echo "names ${IMAGE}, but not in an images entry this check can read (- name: ${IMAGE}, then newTag and digest)" >&2
+      return 1
+    fi
+    echo unpinned
+    return 0
+  fi
   digests="$(grep -E '^[[:space:]]+digest:[[:space:]]' <<<"$entry" || true)"
   tags="$(grep -E '^[[:space:]]+newTag:[[:space:]]' <<<"$entry" || true)"
   local nd nt
@@ -120,6 +132,10 @@ elif [ "$tag" != "$want" ]; then
 fi
 
 # --- rule 2 ----------------------------------------------------------------
+if ! command -v "${inspect[0]}" >/dev/null; then
+  fail 2 "the registry command ${inspect[0]} is not installed here" "run this check where ${inspect[0]} is available"
+  want=""
+fi
 if [ -n "$want" ]; then
   ref="${IMAGE}:${want}"
   if out="$("${inspect[@]}" "$ref" --format '{{json .Manifest}}' 2>"$errd"/inspect.err)"; then
@@ -132,7 +148,8 @@ if [ -n "$want" ]; then
     elif [ "$got" != "$digest" ]; then
       fail 2 "pinned digest ${digest} is not the registry's digest ${got} for ${want}" "$PIN_FIX"
     fi
-  elif grep -Eqi 'not found|MANIFEST_UNKNOWN|NAME_UNKNOWN' "$errd"/inspect.err; then
+  elif ! grep -qi 'command not found' "$errd"/inspect.err &&
+       grep -Eqi 'not found|MANIFEST_UNKNOWN|NAME_UNKNOWN' "$errd"/inspect.err; then
     fail 2 "image ${ref} not built" \
       "wait for the image job on this pull request to pass, then ${PIN_FIX}. A pull request from a fork that changes image inputs cannot be built here; the repo owner handles it"
   else
@@ -146,15 +163,23 @@ if [ "$DROP_COMPONENTS" = true ]; then
   tmp="$(mktemp -d)"
   cp -R "$RENDER_DIR" "$tmp/render"
   k="$tmp/render/kustomization.yaml"
-  # Drop the top-level components: list, up to the next top-level key.
-  awk '/^components:/ {skip=1; next} skip && /^[^[:space:]#-]/ {skip=0} !skip' "$k" > "$k.new"
+  # Drop only remote entries (a URL, or a github.com/ or git@ address) from
+  # the top-level components: list. Local components stay in the render, so
+  # one that sets the image is still checked.
+  awk '
+    /^components:/ { inc = 1; print; next }
+    inc && /^[^[:space:]#-]/ { inc = 0 }
+    inc && /^[[:space:]]*-[[:space:]]*"?([a-z]+:\/\/|github\.com\/|git@)/ { dropped++; next }
+    { print }
+    END { if (dropped == 0) exit 3 }
+  ' "$k" > "$k.new" || { rc=$?; [ "$rc" -eq 3 ] || exit "$rc"; }
   mv "$k.new" "$k"
   dir="$tmp/render"
 fi
 if ! rendered="$("$KUSTOMIZE" build "$dir" 2>"$errd"/kustomize.err)"; then
   fail 3 "kustomize build ${RENDER_DIR} failed: $(tr '\n' ' ' <"$errd"/kustomize.err)" "fix the kustomization so it builds"
 else
-  refs="$(grep -oE "image:[[:space:]]*[\"']?${IMAGE//./\\.}[^[:space:]\"']*" <<<"$rendered" | sed -E "s/^image:[[:space:]]*[\"']?//" || true)"
+  refs="$(grep -oE "image:[[:space:]]*[\"']?${IMAGE//./\\.}([:@][^[:space:]\"']*)?([[:space:]\"']|\$)" <<<"$rendered" | sed -E "s/^image:[[:space:]]*[\"']?//; s/[[:space:]\"']+\$//" || true)"
   if [ -z "$refs" ]; then
     fail 3 "the render has no ${IMAGE} image at all" "keep the images entry for ${IMAGE} in ${PIN_FILE}"
   else

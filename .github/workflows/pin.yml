@@ -66,19 +66,40 @@ jobs:
             echo "::error::cannot tell which release-checks commit this is: job.workflow_sha is '${SHA}', and the release-checks-sha input is '${FALLBACK}'. Set release-checks-sha to the SHA you call this workflow at."
             exit 1
           fi
-          echo "release-checks: ${repo}@${sha} (from ${SHA:+job.workflow_sha}${SHA:-the release-checks-sha input})"
-          echo "repo=${repo}" >> "$GITHUB_OUTPUT"
-          echo "sha=${sha}" >> "$GITHUB_OUTPUT"
+          if [ -n "$SHA" ]; then from=job.workflow_sha; else from="the release-checks-sha input"; fi
+          echo "release-checks: ${repo}@${sha} (from ${from})"
+          {
+            echo "fallback=$([ -n "$SHA" ] && echo false || echo true)"
+            echo "repo=${repo}"
+            echo "sha=${sha}"
+          } >> "$GITHUB_OUTPUT"
+      # Two sibling checkouts: the caller's tree (data only) and this repo,
+      # so neither lands inside the other.
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          path: caller
           persist-credentials: false
           fetch-depth: 2
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           repository: ${{ steps.checks.outputs.repo }}
           ref: ${{ steps.checks.outputs.sha }}
-          path: .release-checks
+          path: checks
           persist-credentials: false
+          fetch-depth: 0
+      # A SHA from the input, unlike job.workflow_sha, is only the caller's
+      # word: it must be a commit on this repo's main.
+      - name: Fallback SHA is on main
+        if: steps.checks.outputs.fallback == 'true'
+        working-directory: checks
+        env:
+          SHA: ${{ steps.checks.outputs.sha }}
+        run: |
+          set -euo pipefail
+          if ! git merge-base --is-ancestor "$SHA" origin/main; then
+            echo "::error::release-checks-sha ${SHA} is not on release-checks main"
+            exit 1
+          fi
       - name: Install kustomize
         run: |
           set -euo pipefail
@@ -100,6 +121,7 @@ jobs:
           ACTOR: ${{ github.actor }}
         run: printf '%s' "$TOKEN" | docker login ghcr.io -u "$ACTOR" --password-stdin
       - name: Check the pin
+        working-directory: caller
         env:
           INPUTS: ${{ inputs.inputs-file }}
           IMAGE: ${{ inputs.image }}
@@ -110,4 +132,4 @@ jobs:
         run: |
           set -euo pipefail
           if [ -z "$RENDER_DIR" ]; then unset RENDER_DIR; fi
-          .release-checks/.github/scripts/pin-check.sh
+          ../checks/.github/scripts/pin-check.sh

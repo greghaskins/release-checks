@@ -1,0 +1,398 @@
+# The shared image builder. An app's image job calls it at a full SHA, with
+# `packages: write`, and passes nothing: everything comes from the app's
+# .github/image.json at the commit being built, through content-tag.sh.
+#
+#   tag           the content tag; is it already in the registry?
+#   build-amd64   the input set alone, built natively, pushed by digest
+#   build-arm64   the same on arm64
+#   merge         joins the two digests in one index under the tag
+#   ref           uploads image-ref {tag, digest}; outputs tag and digest
+#   cache-amd64   on a push to main that changed the tag: writes the
+#   cache-arm64   registry build cache, one tag per platform
+#
+# The commit is the pull request's head (never GitHub's merge commit), or the
+# pushed commit; the same one pin hashes. Build jobs only read the cache; only
+# reviewed trees on main write it. No caller code runs on the runner: the
+# Dockerfile's RUN steps run in BuildKit's containers. Each job sets its own
+# token and timeout. Checkouts never persist credentials.
+name: build
+
+on:
+  workflow_call:
+    outputs:
+      tag:
+        description: The content tag, r-<64 hex>
+        value: ${{ jobs.ref.outputs.tag }}
+      digest:
+        description: The digest of the index under the tag
+        value: ${{ jobs.ref.outputs.digest }}
+
+permissions: {}
+
+env:
+  # BuildKit, pinned by digest like every tool here.
+  BUILDKIT_IMAGE: moby/buildkit:v0.34.1@sha256:99368f3e46177c6405b9740e4461d91cee004128daeecca78d4ceac50ec1da5c
+  # Equal inputs give equal digests: no timestamps from the clock.
+  SOURCE_DATE_EPOCH: "0"
+
+jobs:
+  tag:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      packages: read
+    outputs:
+      commit: ${{ steps.commit.outputs.commit }}
+      checks-repo: ${{ steps.checks.outputs.repo }}
+      checks-sha: ${{ steps.checks.outputs.sha }}
+      image: ${{ steps.tag.outputs.image }}
+      tag: ${{ steps.tag.outputs.tag }}
+      found: ${{ steps.registry.outputs.found }}
+      digest: ${{ steps.registry.outputs.digest }}
+      changed: ${{ steps.before.outputs.changed }}
+    steps:
+      - name: Which release-checks
+        id: checks
+        env:
+          REPO: ${{ job.workflow_repository }}
+          SHA: ${{ job.workflow_sha }}
+        run: |
+          set -euo pipefail
+          if [ -z "$REPO" ] || ! [[ "$SHA" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "::error::cannot tell which release-checks commit this is (job.workflow_repository '${REPO}', job.workflow_sha '${SHA}')"
+            exit 1
+          fi
+          echo "release-checks: ${REPO}@${SHA}"
+          { echo "repo=${REPO}"; echo "sha=${SHA}"; } >> "$GITHUB_OUTPUT"
+      - name: Which commit
+        id: commit
+        env:
+          EVENT: ${{ github.event_name }}
+          PR_HEAD: ${{ github.event.pull_request.head.sha }}
+          SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          case "$EVENT" in
+            pull_request) c="$PR_HEAD" ;;
+            push | merge_group | workflow_dispatch) c="$SHA" ;;
+            *) echo "::error::build runs on pull_request, push, merge_group and workflow_dispatch, not ${EVENT}"; exit 1 ;;
+          esac
+          [[ "$c" =~ ^[0-9a-f]{40}$ ]] || { echo "::error::unexpected commit '${c}'"; exit 1; }
+          echo "commit ${c}"
+          echo "commit=${c}" >> "$GITHUB_OUTPUT"
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ steps.commit.outputs.commit }}
+          path: caller
+          persist-credentials: false
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: ${{ steps.checks.outputs.repo }}
+          ref: ${{ steps.checks.outputs.sha }}
+          path: checks
+          persist-credentials: false
+      - name: Content tag
+        id: tag
+        env:
+          COMMIT: ${{ steps.commit.outputs.commit }}
+        run: |
+          set -euo pipefail
+          ct=checks/.github/scripts/content-tag.sh
+          tag="$("$ct" caller "$COMMIT")"
+          image="$("$ct" --config caller "$COMMIT" | jq -r .image)"
+          [[ "$tag" =~ ^r-[0-9a-f]{64}$ ]] || { echo "::error::content-tag.sh printed '${tag}'"; exit 1; }
+          echo "${image}:${tag}" | tee -a "$GITHUB_STEP_SUMMARY"
+          { echo "tag=${tag}"; echo "image=${image}"; } >> "$GITHUB_OUTPUT"
+      - name: Registry login
+        env:
+          TOKEN: ${{ github.token }}
+          ACTOR: ${{ github.actor }}
+        run: printf '%s' "$TOKEN" | docker login ghcr.io -u "$ACTOR" --password-stdin
+      - name: Is the tag there?
+        id: registry
+        env:
+          REF: ${{ steps.tag.outputs.image }}:${{ steps.tag.outputs.tag }}
+        run: |
+          set -euo pipefail
+          state="$(checks/.github/scripts/registry-state.sh "$REF")"
+          echo "$state"
+          if [ "$state" = missing ]; then
+            { echo "found=false"; echo "digest="; } >> "$GITHUB_OUTPUT"
+          else
+            { echo "found=true"; echo "digest=${state#found }"; } >> "$GITHUB_OUTPUT"
+          fi
+      # On a push to main: did the tag change since the previous main? Never
+      # fails the job; anything unclear counts as changed (one extra cache
+      # write at worst). The fetch uses this job's token for this command only.
+      - name: Tag at the previous main
+        id: before
+        env:
+          EVENT: ${{ github.event_name }}
+          REF: ${{ github.ref }}
+          BEFORE: ${{ github.event.before }}
+          TAG: ${{ steps.tag.outputs.tag }}
+          TOKEN: ${{ github.token }}
+        run: |
+          set -uo pipefail
+          if [ "$EVENT" != push ] || [ "$REF" != refs/heads/main ]; then echo "changed=false" >> "$GITHUB_OUTPUT"; exit 0; fi
+          changed=true
+          if [[ "$BEFORE" =~ ^[0-9a-f]{40}$ ]] && [ "$BEFORE" != 0000000000000000000000000000000000000000 ]; then
+            auth="AUTHORIZATION: basic $(printf 'x-access-token:%s' "$TOKEN" | base64 -w0)"
+            echo "::add-mask::$auth"
+            if GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=http.https://github.com/.extraheader GIT_CONFIG_VALUE_0="$auth" \
+                 git -C caller fetch -q --depth=1 origin "$BEFORE" 2>/dev/null \
+               && old="$(checks/.github/scripts/content-tag.sh caller "$BEFORE" 2>/dev/null)" \
+               && [ "$old" = "$TAG" ]; then
+              changed=false
+            fi
+          fi
+          echo "tag changed since the previous main: ${changed}"
+          echo "changed=${changed}" >> "$GITHUB_OUTPUT"
+
+  build-amd64:
+    needs: tag
+    if: needs.tag.outputs.found == 'false'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      packages: write
+    outputs:
+      digest: ${{ steps.build.outputs.digest }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ needs.tag.outputs.commit }}
+          path: caller
+          persist-credentials: false
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: ${{ needs.tag.outputs.checks-repo }}
+          ref: ${{ needs.tag.outputs.checks-sha }}
+          path: checks
+          persist-credentials: false
+      - name: Build and push by digest
+        id: build
+        env:
+          ARCH: amd64
+          COMMIT: ${{ needs.tag.outputs.commit }}
+          TAG: ${{ needs.tag.outputs.tag }}
+          IMAGE: ${{ needs.tag.outputs.image }}
+          TOKEN: ${{ github.token }}
+          ACTOR: ${{ github.actor }}
+        run: checks/.github/scripts/build-image.sh push
+      - if: always()
+        run: docker logout ghcr.io >/dev/null 2>&1 || true
+
+  build-arm64:
+    needs: tag
+    if: needs.tag.outputs.found == 'false'
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      packages: write
+    outputs:
+      digest: ${{ steps.build.outputs.digest }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ needs.tag.outputs.commit }}
+          path: caller
+          persist-credentials: false
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: ${{ needs.tag.outputs.checks-repo }}
+          ref: ${{ needs.tag.outputs.checks-sha }}
+          path: checks
+          persist-credentials: false
+      - name: Build and push by digest
+        id: build
+        env:
+          ARCH: arm64
+          COMMIT: ${{ needs.tag.outputs.commit }}
+          TAG: ${{ needs.tag.outputs.tag }}
+          IMAGE: ${{ needs.tag.outputs.image }}
+          TOKEN: ${{ github.token }}
+          ACTOR: ${{ github.actor }}
+        run: checks/.github/scripts/build-image.sh push
+      - if: always()
+        run: docker logout ghcr.io >/dev/null 2>&1 || true
+
+  merge:
+    needs: [tag, build-amd64, build-arm64]
+    if: needs.tag.outputs.found == 'false' && needs.build-amd64.result == 'success' && needs.build-arm64.result == 'success'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      packages: write
+    concurrency:
+      group: build-merge-${{ github.repository }}-${{ needs.tag.outputs.image }}-${{ needs.tag.outputs.tag }}
+      cancel-in-progress: false
+    outputs:
+      digest: ${{ steps.merge.outputs.digest }}
+    steps:
+      - name: Registry login
+        env:
+          TOKEN: ${{ github.token }}
+          ACTOR: ${{ github.actor }}
+        run: printf '%s' "$TOKEN" | docker login ghcr.io -u "$ACTOR" --password-stdin
+      - name: Join the platforms under the tag
+        id: merge
+        env:
+          IMAGE: ${{ needs.tag.outputs.image }}
+          TAG: ${{ needs.tag.outputs.tag }}
+          AMD64: ${{ needs.build-amd64.outputs.digest }}
+          ARM64: ${{ needs.build-arm64.outputs.digest }}
+        run: |
+          set -euo pipefail
+          for d in "$AMD64" "$ARM64"; do
+            [[ "$d" =~ ^sha256:[0-9a-f]{64}$ ]] || { echo "::error::a build job gave '${d}', not a digest"; exit 1; }
+            docker buildx imagetools inspect "${IMAGE}@${d}" >/dev/null || { echo "::error::${IMAGE}@${d} is not in the registry"; exit 1; }
+          done
+          # No release-checks checkout here (no contents token): the same
+          # classification as registry-state.sh, inline.
+          state() {
+            local out err; err="$(mktemp)"
+            if out="$(docker buildx imagetools inspect "${IMAGE}:${TAG}" --format '{{json .Manifest}}' 2>"$err")"; then
+              local digest plats
+              digest="$(jq -r '.digest // empty' <<<"$out")"
+              plats="$(jq -r '[.manifests[]? | "\(.platform.os)/\(.platform.architecture)\(if .platform.variant then "/" + .platform.variant else "" end)"] | sort | join(" ")' <<<"$out")"
+              [[ "$digest" =~ ^sha256:[0-9a-f]{64}$ ]] && [ "$plats" = "linux/amd64 linux/arm64" ] \
+                || { echo "::error::${IMAGE}:${TAG} is ${digest:-?}, not an index of exactly linux/amd64 and linux/arm64 (${plats:-none})" >&2; return 1; }
+              echo "found ${digest}"
+            elif grep -Eq 'MANIFEST_UNKNOWN|NAME_UNKNOWN|manifest unknown|name unknown|: not found$' "$err"; then
+              echo missing
+            else
+              echo "::error::cannot read ${IMAGE}:${TAG}: $(tr '\n' ' ' < "$err")" >&2; return 1
+            fi
+          }
+          s="$(state)"
+          if [ "$s" = missing ]; then
+            docker buildx imagetools create -t "${IMAGE}:${TAG}" "${IMAGE}@${AMD64}" "${IMAGE}@${ARM64}"
+            s="$(state)"
+            [ "$s" != missing ] || { echo "::error::${IMAGE}:${TAG} is still missing after create"; exit 1; }
+          else
+            echo "another run made ${IMAGE}:${TAG} meanwhile; keeping it, pushing nothing"
+          fi
+          echo "${IMAGE}:${TAG} is ${s#found }" | tee -a "$GITHUB_STEP_SUMMARY"
+          echo "digest=${s#found }" >> "$GITHUB_OUTPUT"
+      - if: always()
+        run: docker logout ghcr.io >/dev/null 2>&1 || true
+
+  ref:
+    needs: [tag, merge]
+    if: >-
+      !cancelled() && needs.tag.result == 'success' &&
+      (needs.tag.outputs.found == 'true' || needs.merge.result == 'success')
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions: {}
+    outputs:
+      tag: ${{ steps.ref.outputs.tag }}
+      digest: ${{ steps.ref.outputs.digest }}
+    steps:
+      - name: image-ref
+        id: ref
+        env:
+          TAG: ${{ needs.tag.outputs.tag }}
+          FOUND: ${{ needs.tag.outputs.found }}
+          FOUND_DIGEST: ${{ needs.tag.outputs.digest }}
+          MERGED_DIGEST: ${{ needs.merge.outputs.digest }}
+        run: |
+          set -euo pipefail
+          if [ "$FOUND" = true ]; then digest="$FOUND_DIGEST"; else digest="$MERGED_DIGEST"; fi
+          [[ "$TAG" =~ ^r-[0-9a-f]{64}$ && "$digest" =~ ^sha256:[0-9a-f]{64}$ ]] || { echo "::error::bad tag '${TAG}' or digest '${digest}'"; exit 1; }
+          jq -n --arg tag "$TAG" --arg digest "$digest" '{tag: $tag, digest: $digest}' > "$RUNNER_TEMP/image-ref.json"
+          cat "$RUNNER_TEMP/image-ref.json"
+          { echo "tag=${TAG}"; echo "digest=${digest}"; } >> "$GITHUB_OUTPUT"
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: image-ref
+          path: ${{ runner.temp }}/image-ref.json
+          if-no-files-found: error
+          overwrite: true
+          retention-days: 30
+
+  cache-amd64:
+    needs: tag
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main' && needs.tag.outputs.changed == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    continue-on-error: true
+    permissions:
+      contents: read
+      packages: write
+    concurrency:
+      group: build-cache-${{ github.repository }}-${{ needs.tag.outputs.image }}-amd64
+      cancel-in-progress: false
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ needs.tag.outputs.commit }}
+          path: caller
+          persist-credentials: false
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: ${{ needs.tag.outputs.checks-repo }}
+          ref: ${{ needs.tag.outputs.checks-sha }}
+          path: checks
+          persist-credentials: false
+      - name: Write the build cache
+        env:
+          ARCH: amd64
+          COMMIT: ${{ needs.tag.outputs.commit }}
+          TAG: ${{ needs.tag.outputs.tag }}
+          IMAGE: ${{ needs.tag.outputs.image }}
+          TOKEN: ${{ github.token }}
+          ACTOR: ${{ github.actor }}
+          REPO: ${{ github.repository }}
+        run: checks/.github/scripts/build-image.sh cache
+      - if: failure()
+        run: |
+          echo "::warning::the amd64 build cache was not written; the next build runs cold"
+          echo "- warning: the amd64 build cache was not written" >> "$GITHUB_STEP_SUMMARY"
+      - if: always()
+        run: docker logout ghcr.io >/dev/null 2>&1 || true
+
+  cache-arm64:
+    needs: tag
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main' && needs.tag.outputs.changed == 'true'
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 30
+    continue-on-error: true
+    permissions:
+      contents: read
+      packages: write
+    concurrency:
+      group: build-cache-${{ github.repository }}-${{ needs.tag.outputs.image }}-arm64
+      cancel-in-progress: false
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ needs.tag.outputs.commit }}
+          path: caller
+          persist-credentials: false
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: ${{ needs.tag.outputs.checks-repo }}
+          ref: ${{ needs.tag.outputs.checks-sha }}
+          path: checks
+          persist-credentials: false
+      - name: Write the build cache
+        env:
+          ARCH: arm64
+          COMMIT: ${{ needs.tag.outputs.commit }}
+          TAG: ${{ needs.tag.outputs.tag }}
+          IMAGE: ${{ needs.tag.outputs.image }}
+          TOKEN: ${{ github.token }}
+          ACTOR: ${{ github.actor }}
+          REPO: ${{ github.repository }}
+        run: checks/.github/scripts/build-image.sh cache
+      - if: failure()
+        run: |
+          echo "::warning::the arm64 build cache was not written; the next build runs cold"
+          echo "- warning: the arm64 build cache was not written" >> "$GITHUB_STEP_SUMMARY"
+      - if: always()
+        run: docker logout ghcr.io >/dev/null 2>&1 || true

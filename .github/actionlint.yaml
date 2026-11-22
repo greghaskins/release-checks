@@ -15,3 +15,9 @@ paths:
   .github/workflows/release.yml:
     ignore:
       - 'property "workflow_(repository|sha)" is not defined in object type'
+  .github/workflows/secret-scan.yml:
+    ignore:
+      - 'property "workflow_(repository|sha)" is not defined in object type'
+  .github/workflows/secret-scan-text.yml:
+    ignore:
+      - 'property "workflow_(repository|sha)" is not defined in object type'

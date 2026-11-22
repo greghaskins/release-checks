@@ -25,6 +25,8 @@ jobs:
           if [ "${#files[@]}" -gt 0 ]; then shellcheck "${files[@]}"; fi
       - name: repo rules
         run: bash .github/scripts/repo-rules.sh
+      - name: repo rules tests
+        run: bash .github/scripts/repo-rules.test.sh
       # The same pinned kustomize as pin.yml installs.
       - name: Install kustomize
         run: |

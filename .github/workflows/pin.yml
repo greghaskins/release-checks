@@ -1,0 +1,160 @@
+# The `pin` check: the caller's commit names its own image by content tag and
+# digest, and that image exists. Call it from a job in the caller's
+# .github/workflows, pinned by full commit SHA, after the image job and whatever
+# its result (`needs: image`, `if: always()`), with `contents: read` and
+# `packages: read`. The README has a complete caller job.
+#
+# The scripts run from this repo at the SHA the caller pinned, never from the
+# caller's tree: the caller's checkout is data here. Rules: .github/scripts/
+# pin-check.sh. The check is named `<caller job> / pin` in the caller's runs.
+name: pin
+
+on:
+  workflow_call:
+    inputs:
+      render-dir:
+        description: Directory to render for rule 3. Default, the pin file's directory (pin_file in .github/image.json).
+        type: string
+        default: ""
+      drop-components:
+        description: Render a copy without the remote entries of the kustomization's top-level components (ones CI cannot fetch). Local components stay.
+        type: boolean
+        default: false
+      pin-fix:
+        description: How to re-pin, shown in failures, e.g. "run `go run ./tools/pin pin` on the branch".
+        type: string
+        default: run the pin script on the branch
+      release-checks-sha:
+        description: Fallback only, when the job context lacks workflow_sha. The same SHA the caller calls this workflow at.
+        type: string
+        default: ""
+
+permissions:
+  contents: read
+
+jobs:
+  pin:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      packages: read
+    steps:
+      - name: Which release-checks
+        id: checks
+        env:
+          REPO: ${{ job.workflow_repository }}
+          SHA: ${{ job.workflow_sha }}
+          FALLBACK: ${{ inputs.release-checks-sha }}
+        run: |
+          set -euo pipefail
+          repo="${REPO:-greghaskins/release-checks}"
+          sha="${SHA:-$FALLBACK}"
+          if ! [[ "$sha" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "::error::cannot tell which release-checks commit this is: job.workflow_sha is '${SHA}', and the release-checks-sha input is '${FALLBACK}'. Set release-checks-sha to the SHA you call this workflow at."
+            exit 1
+          fi
+          if [ -n "$SHA" ]; then from=job.workflow_sha; else from="the release-checks-sha input"; fi
+          echo "release-checks: ${repo}@${sha} (from ${from})"
+          {
+            echo "fallback=$([ -n "$SHA" ] && echo false || echo true)"
+            echo "repo=${repo}"
+            echo "sha=${sha}"
+          } >> "$GITHUB_OUTPUT"
+      # The commit to check is a pull request's head, never GitHub's merge
+      # commit; on a push, the pushed commit. The base is the pull request's
+      # base, or the commit before the push (none for a new branch).
+      - name: Which commits
+        id: commits
+        env:
+          EVENT: ${{ github.event_name }}
+          PR_HEAD: ${{ github.event.pull_request.head.sha }}
+          PR_BASE: ${{ github.event.pull_request.base.sha }}
+          QUEUE_BASE: ${{ github.event.merge_group.base_sha }}
+          BEFORE: ${{ github.event.before }}
+          SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          # Rule 4 needs the right base, so only events whose base is known.
+          case "$EVENT" in
+            pull_request) HEAD_SHA="$PR_HEAD"; base="$PR_BASE" ;;
+            merge_group) HEAD_SHA="$SHA"; base="$QUEUE_BASE" ;;
+            push) HEAD_SHA="$SHA"; base="$BEFORE"
+              # A new branch has no before.
+              [ "$base" = 0000000000000000000000000000000000000000 ] && base="" ;;
+            *) echo "::error::pin runs on pull_request, merge_group and push, not ${EVENT}: it cannot tell the base for rule 4"; exit 1 ;;
+          esac
+          if ! [[ "$HEAD_SHA" =~ ^[0-9a-f]{40}$ ]] || { [ -n "$base" ] && ! [[ "$base" =~ ^[0-9a-f]{40}$ ]]; }; then
+            echo "::error::unexpected commit ids from the ${EVENT} event: head '${HEAD_SHA}', base '${base}'"
+            exit 1
+          fi
+          echo "head ${HEAD_SHA}, base ${base:-none}"
+          {
+            echo "head=${HEAD_SHA}"
+            echo "base=${base}"
+          } >> "$GITHUB_OUTPUT"
+      # Sibling checkouts: the commit to check and its base (data only), and
+      # this repo, so none lands inside another.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ steps.commits.outputs.head }}
+          path: caller
+          persist-credentials: false
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        if: steps.commits.outputs.base != ''
+        with:
+          ref: ${{ steps.commits.outputs.base }}
+          path: base
+          persist-credentials: false
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: ${{ steps.checks.outputs.repo }}
+          ref: ${{ steps.checks.outputs.sha }}
+          path: checks
+          persist-credentials: false
+          fetch-depth: 0
+      # A SHA from the input, unlike job.workflow_sha, is only the caller's
+      # word: it must be a commit on this repo's main.
+      - name: Fallback SHA is on main
+        if: steps.checks.outputs.fallback == 'true'
+        working-directory: checks
+        env:
+          SHA: ${{ steps.checks.outputs.sha }}
+        run: |
+          set -euo pipefail
+          if ! git merge-base --is-ancestor "$SHA" origin/main; then
+            echo "::error::release-checks-sha ${SHA} is not on release-checks main"
+            exit 1
+          fi
+      - name: Install kustomize
+        run: |
+          set -euo pipefail
+          v=5.8.1
+          case "$(uname -m)" in
+            x86_64) arch=amd64; sum=029a7f0f4e1932c52a0476cf02a0fd855c0bb85694b82c338fc648dcb53a819d ;;
+            aarch64) arch=arm64; sum=0953ea3e476f66d6ddfcd911d750f5167b9365aa9491b2326398e289fef2c142 ;;
+            *) echo "unsupported runner arch $(uname -m)" >&2; exit 1 ;;
+          esac
+          f="kustomize_v${v}_linux_${arch}.tar.gz"
+          curl -fsSL -o "$RUNNER_TEMP/$f" "https://github.com/kubernetes-sigs/kustomize/releases/download/kustomize%2Fv${v}/${f}"
+          echo "${sum}  $RUNNER_TEMP/$f" | sha256sum -c -
+          mkdir -p "$RUNNER_TEMP/bin"
+          tar -xzf "$RUNNER_TEMP/$f" -C "$RUNNER_TEMP/bin" kustomize
+          echo "$RUNNER_TEMP/bin" >> "$GITHUB_PATH"
+      - name: Log in to ghcr.io
+        env:
+          TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          ACTOR: ${{ github.actor }}
+        run: printf '%s' "$TOKEN" | docker login ghcr.io -u "$ACTOR" --password-stdin
+      - name: Check the pin
+        working-directory: caller
+        env:
+          BASE: ${{ steps.commits.outputs.base }}
+          RENDER_DIR: ${{ inputs.render-dir }}
+          DROP_COMPONENTS: ${{ inputs.drop-components }}
+          PIN_FIX: ${{ inputs.pin-fix }}
+        run: |
+          set -euo pipefail
+          if [ -z "$RENDER_DIR" ]; then unset RENDER_DIR; fi
+          if [ -n "$BASE" ]; then export BASE_DIR="$GITHUB_WORKSPACE/base"; fi
+          ../checks/.github/scripts/pin-check.sh

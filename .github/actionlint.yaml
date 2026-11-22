@@ -1,0 +1,7 @@
+# actionlint 1.7.12 (pinned in lint.yml) predates the job.workflow_repository
+# and job.workflow_sha contexts that pin.yml reads to find the release-checks
+# commit it runs at. Ignore exactly those two errors, in that file only.
+paths:
+  .github/workflows/pin.yml:
+    ignore:
+      - 'property "workflow_(repository|sha)" is not defined in object type'

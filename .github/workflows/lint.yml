@@ -41,3 +41,5 @@ jobs:
         run: bash .github/scripts/test.sh
       - name: build tests
         run: bash .github/scripts/build.test.sh
+      - name: release tests
+        run: bash .github/scripts/release.test.sh
